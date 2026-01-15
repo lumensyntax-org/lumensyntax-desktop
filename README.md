@@ -2,21 +2,55 @@
 
 > Local-first governance layer for AI ecosystems
 
-A Tauri-based desktop application that provides a unified interface for the LumenSyntax ecosystem.
+A Tauri-based desktop application that provides a unified interface for the LumenSyntax ecosystem, enabling governance verification, truth tracking, and agent management.
 
 ## Features
 
-- **Governance Panel** - Verify claims with risk profiles (low/medium/high)
-- **Agent Management** - Orchestrate 33 specialized agents (coming soon)
-- **Truth Repository** - Visualize local `.truth/` claims (coming soon)
-- **Audit Trail** - Complete decision history (coming soon)
-- **Knowledge Base** - Integrated Obsidian-lite (coming soon)
-- **Terminal** - Embedded CLI interface (coming soon)
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **Governance Panel** | Verify claims with risk profiles (low/medium/high) | ✅ |
+| **Truth Repository** | Browse local `.truth/` claims and verifications | ✅ |
+| **Agent Management** | View 21 agents across 4 universes | ✅ |
+| **Audit Trail** | Complete timeline of governance decisions | ✅ |
+| **Knowledge Base** | Obsidian-lite vault browser with markdown | ✅ |
+| **Terminal** | Integrated xterm.js with TruthGit commands | ✅ |
+| **Settings** | Configurable paths, API mode, risk profiles | ✅ |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   LumenSyntax Desktop                    │
+├─────────────────────────────────────────────────────────┤
+│  React 19 + TypeScript + Tailwind CSS 4                 │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐       │
+│  │Governance│ │  Truth  │ │ Agents  │ │  Audit  │       │
+│  │  Panel   │ │  Repo   │ │  Panel  │ │  Trail  │       │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘       │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐                   │
+│  │Knowledge│ │Terminal │ │Settings │                   │
+│  │  Base   │ │ xterm.js│ │  Panel  │                   │
+│  └─────────┘ └─────────┘ └─────────┘                   │
+├─────────────────────────────────────────────────────────┤
+│                    Tauri 2.0 + Rust                     │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │ Local-First: TruthGit CLI / Remote: Cloud API   │   │
+│  └─────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Local-First by Default
+
+- **Default Mode**: Uses local TruthGit CLI - data stays on your machine
+- **Optional Remote**: Cloud-hosted API available via Settings
+- **Configurable**: All paths editable in Settings panel
+- **Secure Terminal**: Dangerous command detection and warnings
 
 ## Installation
 
 ### From Release
-Download the latest `.deb` or `.rpm` from [Releases](https://github.com/lumensyntax-org/lumensyntax-desktop/releases).
+
+Download from [Releases](https://github.com/lumensyntax-org/lumensyntax-desktop/releases):
 
 ```bash
 # Ubuntu/Debian
@@ -25,6 +59,14 @@ sudo dpkg -i LumenSyntax_0.1.0_amd64.deb
 # Fedora/RHEL
 sudo rpm -i LumenSyntax-0.1.0-1.x86_64.rpm
 ```
+
+### Requirements
+
+- Linux x86_64
+- TruthGit CLI (for local-first mode):
+  ```bash
+  pip install truthgit
+  ```
 
 ### From Source
 
@@ -41,45 +83,61 @@ sudo apt-get install -y libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 git clone https://github.com/lumensyntax-org/lumensyntax-desktop.git
 cd lumensyntax-desktop
 npm install
-npm run tauri:build
+npm run tauri build
 ```
 
 ## Development
 
 ```bash
+# Install dependencies
+npm install
+
 # Start development server
-npm run dev
+npm run tauri dev
 
-# Run Tauri in dev mode
-npm run tauri:dev
+# Build for production
+npm run tauri build
+
+# Type check
+npm run build
 ```
 
-## Architecture
+## Configuration
 
+Settings are stored in `~/.config/lumensyntax/settings.json`:
+
+```json
+{
+  "vault_path": "/home/user/Documents/Obsidian Vault",
+  "truth_repo_path": "/home/user/project/.truth",
+  "api_mode": "local",
+  "api_url": "https://truthgit-api.run.app",
+  "default_risk_profile": "medium",
+  "terminal_font_size": 14,
+  "auto_save_audit": true
+}
 ```
-┌─────────────────────────────────────────┐
-│           React Frontend                 │
-│  (Governance, Agents, Truth, Audit)     │
-├─────────────────────────────────────────┤
-│           Tauri Bridge                   │
-│  (invoke commands)                       │
-├─────────────────────────────────────────┤
-│           Rust Backend                   │
-│  (TruthGit API, local .truth/)          │
-└─────────────────────────────────────────┘
-```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `api_mode` | `local` (TruthGit CLI) or `remote` (Cloud API) | `local` |
+| `vault_path` | Path to Obsidian vault | `~/Documents/Obsidian Vault` |
+| `truth_repo_path` | Path to `.truth/` directory | `~/.truth` |
+| `default_risk_profile` | `low`, `medium`, or `high` | `medium` |
 
 ## Tech Stack
 
-- **Frontend**: React 19, TypeScript, Tailwind CSS, Framer Motion
-- **Backend**: Rust, Tauri 2.0
-- **API**: TruthGit Governance API
-
-## Related Projects
-
-- [TruthGit](https://github.com/lumensyntax-org/truthgit) - Governance layer for autonomous agents
-- [LumenSyntax Core](https://github.com/lumensyntax-org/lumensyntax-core) - Core ecosystem packages
+- **Frontend**: React 19, TypeScript, Tailwind CSS 4
+- **Backend**: Tauri 2.0, Rust
+- **Terminal**: xterm.js with addons
+- **Animations**: Framer Motion
+- **Markdown**: react-markdown + remark-gfm
 
 ## License
 
 MIT
+
+## Links
+
+- [TruthGit](https://pypi.org/project/truthgit/) - Truth verification system
+- [LumenSyntax](https://github.com/lumensyntax-org) - Main organization
