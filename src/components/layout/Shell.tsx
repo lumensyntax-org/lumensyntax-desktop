@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { Sidebar, type View } from './Sidebar';
 import { Header } from './Header';
 import { GovernancePanel } from '../governance/GovernancePanel';
+import { TruthPanel } from '../truth/TruthPanel';
+import { AgentsPanel } from '../agents/AgentsPanel';
+import { AuditPanel } from '../audit/AuditPanel';
 
 export function Shell() {
   const [currentView, setCurrentView] = useState<View>('governance');
@@ -17,9 +20,9 @@ export function Shell() {
 
         <main className="flex-1 overflow-auto p-6">
           {currentView === 'governance' && <GovernancePanel />}
-          {currentView === 'agents' && <PlaceholderView title="Agents" description="Agent management coming in Phase 3" />}
-          {currentView === 'truth' && <PlaceholderView title="Truth Repository" description="Truth repo viewer coming in Phase 2" />}
-          {currentView === 'audit' && <PlaceholderView title="Audit Trail" description="Audit timeline coming in Phase 4" />}
+          {currentView === 'agents' && <AgentsPanel />}
+          {currentView === 'truth' && <TruthPanel />}
+          {currentView === 'audit' && <AuditPanel />}
           {currentView === 'knowledge' && <PlaceholderView title="Knowledge Base" description="Knowledge browser coming in Phase 5" />}
           {currentView === 'terminal' && <PlaceholderView title="Terminal" description="Integrated terminal coming in Phase 6" />}
           {currentView === 'settings' && <PlaceholderView title="Settings" description="Configuration panel coming soon" />}

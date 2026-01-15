@@ -48,6 +48,25 @@ export function GovernancePanel() {
         riskProfile,
       });
       setResult(res);
+
+      // Log to audit trail
+      try {
+        await invoke('add_audit_entry', {
+          entry: {
+            id: res.audit_ref,
+            timestamp: new Date().toISOString(),
+            action: 'governance_verify',
+            claim,
+            domain,
+            risk_profile: riskProfile,
+            result_status: res.status,
+            result_action: res.action,
+            confidence: res.confidence,
+          },
+        });
+      } catch (auditErr) {
+        console.warn('Failed to log audit entry:', auditErr);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
