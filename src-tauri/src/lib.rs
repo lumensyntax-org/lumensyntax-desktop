@@ -566,6 +566,85 @@ async fn search_notes(query: String) -> Result<Vec<SearchResult>, String> {
     Ok(results)
 }
 
+// ==================== TERMINAL COMMANDS ====================
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShellOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub success: bool,
+}
+
+#[tauri::command]
+async fn execute_shell(command: String, cwd: Option<String>) -> Result<ShellOutput, String> {
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "bash"
+    };
+
+    let shell_arg = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
+
+    let working_dir = cwd.unwrap_or_else(|| {
+        dirs::home_dir()
+            .map(|h| h.join("Almacen_IA/LumenSyntax-Main").to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    });
+
+    let output = Command::new(shell)
+        .arg(shell_arg)
+        .arg(&command)
+        .current_dir(&working_dir)
+        .output()
+        .map_err(|e| format!("Failed to execute command: {}", e))?;
+
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    Ok(ShellOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code,
+        success: output.status.success(),
+    })
+}
+
+#[tauri::command]
+async fn get_shell_suggestions(prefix: String) -> Result<Vec<String>, String> {
+    let mut suggestions = Vec::new();
+
+    // TruthGit commands
+    let truthgit_commands = [
+        "truthgit status",
+        "truthgit verify",
+        "truthgit safe-verify",
+        "truthgit prove",
+        "truthgit search",
+        "truthgit log",
+        "truthgit init",
+    ];
+
+    // Common commands
+    let common_commands = [
+        "ls", "cd", "pwd", "cat", "git status", "git log", "git diff",
+        "npm run", "python", "pip", "cargo",
+    ];
+
+    let prefix_lower = prefix.to_lowercase();
+
+    for cmd in truthgit_commands.iter().chain(common_commands.iter()) {
+        if cmd.to_lowercase().starts_with(&prefix_lower) {
+            suggestions.push(cmd.to_string());
+        }
+    }
+
+    Ok(suggestions)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -585,6 +664,9 @@ pub fn run() {
             list_vault_directory,
             read_note,
             search_notes,
+            // Terminal
+            execute_shell,
+            get_shell_suggestions,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
