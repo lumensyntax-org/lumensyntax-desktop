@@ -5,7 +5,35 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::RwLock;
+use std::time::Duration;
 use walkdir::WalkDir;
+
+// ==================== SECURITY LIMITS ====================
+
+/// Maximum files to traverse in vault operations (DoS prevention)
+const MAX_VAULT_FILES: usize = 50_000;
+
+/// Maximum search results to return
+const MAX_SEARCH_RESULTS: usize = 100;
+
+/// Maximum matches per file in search results
+const MAX_MATCHES_PER_FILE: usize = 10;
+
+/// Maximum decompressed object size (10 MB) - OOM prevention
+const MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
+
+/// Subprocess timeout in seconds
+const SUBPROCESS_TIMEOUT_SECS: u64 = 30;
+
+/// Sanitize paths in error messages to avoid exposing full directory structure
+fn sanitize_error(error: &str) -> String {
+    // Replace home directory with ~
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.to_string_lossy();
+        return error.replace(home_str.as_ref(), "~");
+    }
+    error.to_string()
+}
 
 // ==================== APP SETTINGS (CONFIGURABLE) ====================
 
@@ -33,8 +61,9 @@ impl Default for AppSettings {
             truth_repo_path: home.join(".truth").to_string_lossy().to_string(),
             // LOCAL-FIRST by default - no remote API calls unless explicitly enabled
             api_mode: "local".to_string(),
-            // Remote API URL (only used if api_mode is "remote")
-            api_url: "https://truthgit-api-342668283383.us-central1.run.app".to_string(),
+            // SECURITY: Default to localhost - user must explicitly configure remote API
+            // This prevents accidental data leakage to remote endpoints
+            api_url: "http://localhost:8000".to_string(),
             default_risk_profile: "medium".to_string(),
             terminal_font_size: 14,
             auto_save_audit: true,
@@ -143,6 +172,43 @@ fn get_truth_path() -> Option<PathBuf> {
     Some(path)
 }
 
+/// Execute a command with timeout (prevents hanging on blocked processes)
+async fn execute_with_timeout(
+    program: &str,
+    args: &[String],
+    working_dir: Option<&str>,
+) -> Result<std::process::Output, String> {
+    let timeout_duration = Duration::from_secs(SUBPROCESS_TIMEOUT_SECS);
+
+    // Clone for use in error messages after closure consumes the values
+    let program_for_error = program.to_string();
+
+    // Spawn the command in a blocking task with timeout
+    let program = program.to_string();
+    let args = args.to_vec();
+    let working_dir = working_dir.map(|s| s.to_string());
+
+    let result = tokio::time::timeout(timeout_duration, tokio::task::spawn_blocking(move || {
+        let mut cmd = Command::new(&program);
+        cmd.args(&args);
+        if let Some(dir) = &working_dir {
+            cmd.current_dir(dir);
+        }
+        cmd.output()
+    }))
+    .await;
+
+    match result {
+        Ok(Ok(Ok(output))) => Ok(output),
+        Ok(Ok(Err(e))) => Err(sanitize_error(&format!("Failed to execute '{}': {}", program_for_error, e))),
+        Ok(Err(e)) => Err(sanitize_error(&format!("Task execution error: {}", e))),
+        Err(_) => Err(format!(
+            "Command '{}' timed out after {} seconds. Process may be stuck.",
+            program_for_error, SUBPROCESS_TIMEOUT_SECS
+        )),
+    }
+}
+
 fn get_vault_path() -> Option<PathBuf> {
     // Use configurable path from settings
     let settings = SETTINGS.read().ok()?;
@@ -192,12 +258,33 @@ fn decompress_object(path: &PathBuf) -> Result<serde_json::Value, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
 
     let mut decoder = ZlibDecoder::new(file);
-    let mut decompressed = String::new();
-    decoder
-        .read_to_string(&mut decompressed)
-        .map_err(|e| format!("Failed to decompress: {}", e))?;
 
-    serde_json::from_str(&decompressed)
+    // SECURITY: Read with size limit to prevent OOM from malicious compressed data
+    let mut decompressed = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut total_read = 0usize;
+
+    loop {
+        match decoder.read(&mut buffer) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                total_read += n;
+                if total_read > MAX_DECOMPRESSED_SIZE {
+                    return Err(format!(
+                        "Decompressed data exceeds size limit ({} bytes). Possible decompression bomb.",
+                        MAX_DECOMPRESSED_SIZE
+                    ));
+                }
+                decompressed.extend_from_slice(&buffer[..n]);
+            }
+            Err(e) => return Err(format!("Failed to decompress: {}", e)),
+        }
+    }
+
+    let decompressed_str = String::from_utf8(decompressed)
+        .map_err(|e| format!("Invalid UTF-8 in decompressed data: {}", e))?;
+
+    serde_json::from_str(&decompressed_str)
         .map_err(|e| format!("Failed to parse JSON: {}", e))
 }
 
@@ -246,10 +333,18 @@ async fn governance_verify(
 
 // Local governance verification using TruthGit CLI
 async fn governance_verify_local(claim: &str, domain: &str, risk_profile: &str) -> Result<GovernanceResult, String> {
-    let output = Command::new("truthgit")
-        .args(["safe-verify", claim, "--domain", domain, "--risk", risk_profile, "--json"])
-        .output()
-        .map_err(|e| format!("Failed to run truthgit CLI: {}. Is TruthGit installed?", e))?;
+    let args = vec![
+        "safe-verify".to_string(),
+        claim.to_string(),
+        "--domain".to_string(),
+        domain.to_string(),
+        "--risk".to_string(),
+        risk_profile.to_string(),
+        "--json".to_string(),
+    ];
+
+    let output = execute_with_timeout("truthgit", &args, None).await
+        .map_err(|e| format!("{}. Is TruthGit installed?", e))?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -284,7 +379,7 @@ async fn governance_verify_local(claim: &str, domain: &str, risk_profile: &str) 
         })
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("TruthGit verification failed: {}", stderr))
+        Err(sanitize_error(&format!("TruthGit verification failed: {}", stderr)))
     }
 }
 
@@ -461,33 +556,35 @@ async fn run_truthgit_command(args: Vec<String>) -> Result<String, String> {
     validate_truthgit_args(&args)?;
     // ====== END SECURITY CHECK ======
 
-    let output = Command::new("truthgit")
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to run truthgit: {}", e))?;
+    let output = execute_with_timeout("truthgit", &args, None).await?;
 
     if output.status.success() {
         String::from_utf8(output.stdout)
             .map_err(|e| format!("Invalid UTF-8 output: {}", e))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("TruthGit error: {}", stderr))
+        Err(sanitize_error(&format!("TruthGit error: {}", stderr)))
     }
 }
 
 #[tauri::command]
 async fn verify_claim_local(claim: String, domain: String) -> Result<String, String> {
-    let output = Command::new("truthgit")
-        .args(["verify", &claim, "--domain", &domain, "--json"])
-        .output()
-        .map_err(|e| format!("Failed to run truthgit: {}", e))?;
+    let args = vec![
+        "verify".to_string(),
+        claim,
+        "--domain".to_string(),
+        domain,
+        "--json".to_string(),
+    ];
+
+    let output = execute_with_timeout("truthgit", &args, None).await?;
 
     if output.status.success() {
         String::from_utf8(output.stdout)
             .map_err(|e| format!("Invalid UTF-8 output: {}", e))
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Verification failed: {}", stderr))
+        Err(sanitize_error(&format!("Verification failed: {}", stderr)))
     }
 }
 
@@ -621,21 +718,31 @@ async fn get_vault_status() -> Result<serde_json::Value, String> {
             "path": vault_path.to_string_lossy().to_string(),
             "file_count": 0,
             "folder_count": 0,
+            "truncated": false,
         }));
     }
 
     let mut file_count = 0;
     let mut folder_count = 0;
+    let mut truncated = false;
 
+    // SECURITY: Limit traversal to prevent DoS on large vaults
     for entry in WalkDir::new(&vault_path)
         .min_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
+        .take(MAX_VAULT_FILES)
     {
         if entry.file_type().is_file() {
             file_count += 1;
         } else if entry.file_type().is_dir() {
             folder_count += 1;
+        }
+
+        // Check if we hit the limit
+        if file_count + folder_count >= MAX_VAULT_FILES {
+            truncated = true;
+            break;
         }
     }
 
@@ -644,6 +751,7 @@ async fn get_vault_status() -> Result<serde_json::Value, String> {
         "path": vault_path.to_string_lossy().to_string(),
         "file_count": file_count,
         "folder_count": folder_count,
+        "truncated": truncated,
     }))
 }
 
@@ -748,14 +856,32 @@ async fn search_notes(query: String) -> Result<Vec<SearchResult>, String> {
         return Ok(vec![]);
     }
 
+    // SECURITY: Validate query length to prevent regex DoS
+    if query.len() > 200 {
+        return Err("Search query too long (max 200 characters)".to_string());
+    }
+
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
+    let mut files_searched = 0;
 
+    // SECURITY: Limit file traversal
     for entry in WalkDir::new(&vault_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
+        // Check file limit
+        files_searched += 1;
+        if files_searched > MAX_VAULT_FILES {
+            break;
+        }
+
+        // Check result limit
+        if results.len() >= MAX_SEARCH_RESULTS {
+            break;
+        }
+
         let path = entry.path();
 
         // Only search markdown files
@@ -774,6 +900,11 @@ async fn search_notes(query: String) -> Result<Vec<SearchResult>, String> {
 
             for (i, line) in content.lines().enumerate() {
                 if line.to_lowercase().contains(&query_lower) {
+                    // SECURITY: Limit matches per file
+                    if matches.len() >= MAX_MATCHES_PER_FILE {
+                        break;
+                    }
+
                     // Truncate long lines
                     let truncated = if line.len() > 100 {
                         format!("{}...", &line[..100])
@@ -1040,18 +1171,15 @@ async fn execute_shell(command: String, cwd: Option<String>) -> Result<ShellOutp
             .unwrap_or_else(|| ".".to_string())
     });
 
-    // Execute directly WITHOUT shell (safer - no shell interpolation)
-    let output = Command::new(&program)
-        .args(&args)
-        .current_dir(&working_dir)
-        .output()
-        .map_err(|e| format!("Failed to execute '{}': {}", program, e))?;
+    // Execute with timeout to prevent hanging
+    let output = execute_with_timeout(&program, &args, Some(&working_dir)).await?;
 
     let exit_code = output.status.code().unwrap_or(-1);
 
+    // SECURITY: Sanitize paths in output to avoid exposing directory structure
     Ok(ShellOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout: sanitize_error(&String::from_utf8_lossy(&output.stdout)),
+        stderr: sanitize_error(&String::from_utf8_lossy(&output.stderr)),
         exit_code,
         success: output.status.success(),
     })
@@ -1436,5 +1564,55 @@ mod tests {
         // Even URL-encoded or other variants with ".." should fail
         let result = validate_path_within_base(&base, "foo/../../../etc/passwd");
         assert!(result.is_err());
+    }
+
+    // ====== Security limits tests ======
+
+    #[test]
+    fn test_security_limits_configured() {
+        // Verify security limits are set to reasonable values
+        assert!(MAX_VAULT_FILES > 0);
+        assert!(MAX_VAULT_FILES <= 100_000); // Reasonable upper bound
+        assert!(MAX_SEARCH_RESULTS > 0);
+        assert!(MAX_SEARCH_RESULTS <= 500);
+        assert!(MAX_MATCHES_PER_FILE > 0);
+        assert!(MAX_DECOMPRESSED_SIZE > 0);
+        assert!(MAX_DECOMPRESSED_SIZE <= 100 * 1024 * 1024); // Max 100MB
+        assert!(SUBPROCESS_TIMEOUT_SECS > 0);
+        assert!(SUBPROCESS_TIMEOUT_SECS <= 300); // Max 5 minutes
+    }
+
+    #[test]
+    fn test_sanitize_error_replaces_home() {
+        // This test verifies the sanitize function works
+        // Note: In CI without a home dir, this may behave differently
+        if let Some(home) = dirs::home_dir() {
+            let home_str = home.to_string_lossy();
+            let error_with_path = format!("Error at {}/secret/file.txt", home_str);
+            let sanitized = sanitize_error(&error_with_path);
+            assert!(!sanitized.contains(&*home_str));
+            assert!(sanitized.contains("~/secret/file.txt"));
+        }
+    }
+
+    #[test]
+    fn test_sanitize_error_preserves_non_home_paths() {
+        let error = "Error at /var/log/app.log";
+        let sanitized = sanitize_error(error);
+        assert_eq!(sanitized, error); // Should remain unchanged
+    }
+
+    // ====== Default settings security tests ======
+
+    #[test]
+    fn test_default_api_mode_is_local() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.api_mode, "local");
+    }
+
+    #[test]
+    fn test_default_api_url_is_localhost() {
+        let settings = AppSettings::default();
+        assert!(settings.api_url.contains("localhost"));
     }
 }
