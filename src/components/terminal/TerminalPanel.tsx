@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -28,127 +28,15 @@ export function TerminalPanel() {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const [currentLine, setCurrentLine] = useState('');
-  const [commandHistory, setCommandHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  // Use refs for mutable state that the key handler needs
+  const currentLineRef = useRef('');
+  const commandHistoryRef = useRef<string[]>([]);
+  const historyIndexRef = useRef(-1);
+  const isExecutingRef = useRef(false);
+
+  // State only for UI updates
   const [isExecuting, setIsExecuting] = useState(false);
-
-  const writePrompt = useCallback(() => {
-    xtermRef.current?.write(PROMPT);
-  }, []);
-
-  const executeCommand = useCallback(async (command: string) => {
-    if (!command.trim()) {
-      writePrompt();
-      return;
-    }
-
-    setIsExecuting(true);
-    setCommandHistory((prev) => [...prev, command]);
-    setHistoryIndex(-1);
-
-    try {
-      const result = await invoke<ShellOutput>('execute_shell', {
-        command,
-        cwd: null,
-      });
-
-      if (result.stdout) {
-        xtermRef.current?.write(result.stdout);
-        if (!result.stdout.endsWith('\n')) {
-          xtermRef.current?.write('\r\n');
-        }
-      }
-
-      if (result.stderr) {
-        xtermRef.current?.write(`\x1b[31m${result.stderr}\x1b[0m`);
-        if (!result.stderr.endsWith('\n')) {
-          xtermRef.current?.write('\r\n');
-        }
-      }
-
-      if (!result.success) {
-        xtermRef.current?.write(`\x1b[90mExit code: ${result.exit_code}\x1b[0m\r\n`);
-      }
-    } catch (err) {
-      xtermRef.current?.write(`\x1b[31mError: ${err}\x1b[0m\r\n`);
-    }
-
-    setIsExecuting(false);
-    writePrompt();
-  }, [writePrompt]);
-
-  const handleKeyEvent = useCallback((event: { key: string; domEvent: KeyboardEvent }) => {
-    const { key, domEvent } = event;
-    const term = xtermRef.current;
-    if (!term || isExecuting) return;
-
-    // Handle special keys
-    if (domEvent.key === 'Enter') {
-      term.write('\r\n');
-      executeCommand(currentLine);
-      setCurrentLine('');
-      return;
-    }
-
-    if (domEvent.key === 'Backspace') {
-      if (currentLine.length > 0) {
-        setCurrentLine((prev) => prev.slice(0, -1));
-        term.write('\b \b');
-      }
-      return;
-    }
-
-    if (domEvent.key === 'ArrowUp') {
-      if (commandHistory.length > 0) {
-        const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
-        setHistoryIndex(newIndex);
-        const historyCmd = commandHistory[commandHistory.length - 1 - newIndex];
-        // Clear current line
-        term.write('\r' + PROMPT + ' '.repeat(currentLine.length) + '\r' + PROMPT);
-        term.write(historyCmd);
-        setCurrentLine(historyCmd);
-      }
-      return;
-    }
-
-    if (domEvent.key === 'ArrowDown') {
-      if (historyIndex > 0) {
-        const newIndex = historyIndex - 1;
-        setHistoryIndex(newIndex);
-        const historyCmd = commandHistory[commandHistory.length - 1 - newIndex];
-        term.write('\r' + PROMPT + ' '.repeat(currentLine.length) + '\r' + PROMPT);
-        term.write(historyCmd);
-        setCurrentLine(historyCmd);
-      } else if (historyIndex === 0) {
-        setHistoryIndex(-1);
-        term.write('\r' + PROMPT + ' '.repeat(currentLine.length) + '\r' + PROMPT);
-        setCurrentLine('');
-      }
-      return;
-    }
-
-    // Handle Ctrl+C
-    if (domEvent.ctrlKey && domEvent.key === 'c') {
-      term.write('^C\r\n');
-      setCurrentLine('');
-      writePrompt();
-      return;
-    }
-
-    // Handle Ctrl+L (clear)
-    if (domEvent.ctrlKey && domEvent.key === 'l') {
-      term.clear();
-      writePrompt();
-      return;
-    }
-
-    // Regular character input
-    if (key.length === 1 && !domEvent.ctrlKey && !domEvent.altKey && !domEvent.metaKey) {
-      setCurrentLine((prev) => prev + key);
-      term.write(key);
-    }
-  }, [currentLine, commandHistory, historyIndex, isExecuting, executeCommand, writePrompt]);
 
   useEffect(() => {
     if (!terminalRef.current || xtermRef.current) return;
@@ -196,10 +84,136 @@ export function TerminalPanel() {
     term.write(WELCOME_MESSAGE);
     term.write(PROMPT);
 
-    term.onKey(handleKeyEvent);
-
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    const writePrompt = () => {
+      term.write(PROMPT);
+    };
+
+    const executeCommand = async (command: string) => {
+      if (!command.trim()) {
+        writePrompt();
+        return;
+      }
+
+      isExecutingRef.current = true;
+      setIsExecuting(true);
+      commandHistoryRef.current = [...commandHistoryRef.current, command];
+      historyIndexRef.current = -1;
+
+      try {
+        const result = await invoke<ShellOutput>('execute_shell', {
+          command,
+          cwd: null,
+        });
+
+        if (result.stdout) {
+          term.write(result.stdout);
+          if (!result.stdout.endsWith('\n')) {
+            term.write('\r\n');
+          }
+        }
+
+        if (result.stderr) {
+          term.write(`\x1b[31m${result.stderr}\x1b[0m`);
+          if (!result.stderr.endsWith('\n')) {
+            term.write('\r\n');
+          }
+        }
+
+        if (!result.success) {
+          term.write(`\x1b[90mExit code: ${result.exit_code}\x1b[0m\r\n`);
+        }
+      } catch (err) {
+        term.write(`\x1b[31mError: ${err}\x1b[0m\r\n`);
+      }
+
+      isExecutingRef.current = false;
+      setIsExecuting(false);
+      writePrompt();
+    };
+
+    // Key handler using refs (no stale closures)
+    term.onKey((event: { key: string; domEvent: KeyboardEvent }) => {
+      const { key, domEvent } = event;
+      if (isExecutingRef.current) return;
+
+      const currentLine = currentLineRef.current;
+      const commandHistory = commandHistoryRef.current;
+      const historyIndex = historyIndexRef.current;
+
+      // Handle Enter
+      if (domEvent.key === 'Enter') {
+        term.write('\r\n');
+        executeCommand(currentLine);
+        currentLineRef.current = '';
+        return;
+      }
+
+      // Handle Backspace
+      if (domEvent.key === 'Backspace') {
+        if (currentLine.length > 0) {
+          currentLineRef.current = currentLine.slice(0, -1);
+          term.write('\b \b');
+        }
+        return;
+      }
+
+      // Handle Arrow Up (history)
+      if (domEvent.key === 'ArrowUp') {
+        if (commandHistory.length > 0) {
+          const newIndex = historyIndex < commandHistory.length - 1 ? historyIndex + 1 : historyIndex;
+          historyIndexRef.current = newIndex;
+          const historyCmd = commandHistory[commandHistory.length - 1 - newIndex];
+          term.write('\r' + PROMPT + ' '.repeat(currentLine.length) + '\r' + PROMPT);
+          term.write(historyCmd);
+          currentLineRef.current = historyCmd;
+        }
+        return;
+      }
+
+      // Handle Arrow Down (history)
+      if (domEvent.key === 'ArrowDown') {
+        if (historyIndex > 0) {
+          const newIndex = historyIndex - 1;
+          historyIndexRef.current = newIndex;
+          const historyCmd = commandHistory[commandHistory.length - 1 - newIndex];
+          term.write('\r' + PROMPT + ' '.repeat(currentLine.length) + '\r' + PROMPT);
+          term.write(historyCmd);
+          currentLineRef.current = historyCmd;
+        } else if (historyIndex === 0) {
+          historyIndexRef.current = -1;
+          term.write('\r' + PROMPT + ' '.repeat(currentLine.length) + '\r' + PROMPT);
+          currentLineRef.current = '';
+        }
+        return;
+      }
+
+      // Handle Ctrl+C
+      if (domEvent.ctrlKey && domEvent.key === 'c') {
+        term.write('^C\r\n');
+        currentLineRef.current = '';
+        writePrompt();
+        return;
+      }
+
+      // Handle Ctrl+L (clear)
+      if (domEvent.ctrlKey && domEvent.key === 'l') {
+        term.clear();
+        writePrompt();
+        return;
+      }
+
+      // Regular character input
+      if (key.length === 1 && !domEvent.ctrlKey && !domEvent.altKey && !domEvent.metaKey) {
+        currentLineRef.current = currentLine + key;
+        term.write(key);
+      }
+    });
+
+    // Auto-focus
+    term.focus();
 
     const handleResize = () => {
       fitAddon.fit();
@@ -212,13 +226,16 @@ export function TerminalPanel() {
       term.dispose();
       xtermRef.current = null;
     };
-  }, [handleKeyEvent]);
+  }, []); // Empty deps - only run once
 
   const clearTerminal = () => {
-    xtermRef.current?.clear();
-    xtermRef.current?.write(WELCOME_MESSAGE);
-    writePrompt();
-    setCurrentLine('');
+    const term = xtermRef.current;
+    if (term) {
+      term.clear();
+      term.write(WELCOME_MESSAGE);
+      term.write(PROMPT);
+      currentLineRef.current = '';
+    }
   };
 
   const quickCommands = [
@@ -227,10 +244,45 @@ export function TerminalPanel() {
     { label: 'Git Status', command: 'git status' },
   ];
 
-  const runQuickCommand = (command: string) => {
-    if (xtermRef.current && !isExecuting) {
-      xtermRef.current.write(command + '\r\n');
-      executeCommand(command);
+  const runQuickCommand = async (command: string) => {
+    const term = xtermRef.current;
+    if (term && !isExecutingRef.current) {
+      term.write(command + '\r\n');
+
+      isExecutingRef.current = true;
+      setIsExecuting(true);
+      commandHistoryRef.current = [...commandHistoryRef.current, command];
+
+      try {
+        const result = await invoke<ShellOutput>('execute_shell', {
+          command,
+          cwd: null,
+        });
+
+        if (result.stdout) {
+          term.write(result.stdout);
+          if (!result.stdout.endsWith('\n')) {
+            term.write('\r\n');
+          }
+        }
+
+        if (result.stderr) {
+          term.write(`\x1b[31m${result.stderr}\x1b[0m`);
+          if (!result.stderr.endsWith('\n')) {
+            term.write('\r\n');
+          }
+        }
+
+        if (!result.success) {
+          term.write(`\x1b[90mExit code: ${result.exit_code}\x1b[0m\r\n`);
+        }
+      } catch (err) {
+        term.write(`\x1b[31mError: ${err}\x1b[0m\r\n`);
+      }
+
+      isExecutingRef.current = false;
+      setIsExecuting(false);
+      term.write(PROMPT);
     }
   };
 
@@ -278,7 +330,8 @@ export function TerminalPanel() {
       <div className="flex-1 p-2 overflow-hidden">
         <div
           ref={terminalRef}
-          className="h-full w-full"
+          className="h-full w-full cursor-text"
+          onClick={() => xtermRef.current?.focus()}
         />
       </div>
     </div>
