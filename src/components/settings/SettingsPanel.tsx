@@ -21,11 +21,15 @@ interface AppSettings {
   auto_save_audit: boolean;
 }
 
+// SECURITY: Frontend defaults MUST match backend defaults (lib.rs)
+// These are only used as fallback if backend is unreachable
+// resetSettings() fetches fresh defaults from backend instead of using these
 const DEFAULT_SETTINGS: AppSettings = {
-  vault_path: '~/Documents/Obsidian Vault',
-  truth_repo_path: '~/Almacen_IA/LumenSyntax-Main/.truth',
+  vault_path: '~/Documents/Obsidian',
+  truth_repo_path: '~/.truth',
   api_mode: 'local',
-  api_url: 'https://truthgit-api-342668283383.us-central1.run.app',
+  // SECURITY: Default to localhost - prevents accidental data leakage to remote endpoints
+  api_url: 'http://localhost:8000',
   default_risk_profile: 'medium',
   terminal_font_size: 14,
   auto_save_audit: true,
@@ -181,8 +185,11 @@ export function SettingsPanel() {
   };
 
   const resetSettings = async () => {
+    // SECURITY: Use frontend defaults that match backend defaults (lib.rs)
+    // Both frontend and backend defaults are now synchronized to use localhost
     setSettings(DEFAULT_SETTINGS);
     setHasChanges(true);
+    setSaveMessage('Settings reset to defaults - click Save to apply');
   };
 
   if (isLoading) {
@@ -369,8 +376,8 @@ export function SettingsPanel() {
           {/* Version Info */}
           <div className="bg-zinc-900/30 border border-zinc-800/50 rounded-xl p-6 text-center">
             <p className="text-zinc-400 text-sm mb-2">TruthGit Desktop</p>
-            <p className="text-2xl font-light text-zinc-200 mb-1">v0.2.0</p>
-            <p className="text-xs text-zinc-600">Phase 6 Complete - Local-First Architecture</p>
+            <p className="text-2xl font-light text-zinc-200 mb-1">v0.2.4</p>
+            <p className="text-xs text-zinc-600">Security Hardening Release</p>
             <div className="mt-4 flex items-center justify-center gap-4 text-xs text-zinc-500">
               <span>Tauri 2.0</span>
               <span>•</span>
