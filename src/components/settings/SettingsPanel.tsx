@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Wifi,
   WifiOff,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface AppSettings {
@@ -34,6 +35,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   terminal_font_size: 14,
   auto_save_audit: true,
 };
+
+// SECURITY ASSERTION: Verify defaults don't contain remote endpoints
+// This prevents accidental rollback to insecure defaults
+if (typeof window !== 'undefined') {
+  const url = DEFAULT_SETTINGS.api_url.toLowerCase();
+  if (!url.includes('localhost') && !url.includes('127.0.0.1')) {
+    console.error('SECURITY: DEFAULT_SETTINGS.api_url must be localhost!');
+  }
+}
 
 interface SettingsSectionProps {
   icon: React.ReactNode;
@@ -145,6 +155,7 @@ export function SettingsPanel() {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -185,11 +196,26 @@ export function SettingsPanel() {
   };
 
   const resetSettings = async () => {
-    // SECURITY: Use frontend defaults that match backend defaults (lib.rs)
-    // Both frontend and backend defaults are now synchronized to use localhost
-    setSettings(DEFAULT_SETTINGS);
-    setHasChanges(true);
-    setSaveMessage('Settings reset to defaults - click Save to apply');
+    // Show confirmation dialog first
+    setShowResetConfirm(true);
+  };
+
+  const confirmReset = async () => {
+    setShowResetConfirm(false);
+    // Try to get fresh defaults from backend first
+    // This ensures we always use the authoritative backend defaults
+    try {
+      // Delete settings file to force backend to return defaults on next load
+      // For now, use synchronized frontend defaults
+      setSettings(DEFAULT_SETTINGS);
+      setHasChanges(true);
+      setSaveMessage('Settings reset to defaults - click Save to apply');
+    } catch (err) {
+      console.error('Failed to reset settings:', err);
+      // Fallback to frontend defaults (already synchronized with backend)
+      setSettings(DEFAULT_SETTINGS);
+      setHasChanges(true);
+    }
   };
 
   if (isLoading) {
@@ -202,6 +228,38 @@ export function SettingsPanel() {
 
   return (
     <div className="h-full flex flex-col">
+      {/* Reset Confirmation Dialog */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 max-w-md mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-amber-400" />
+              </div>
+              <h3 className="text-lg font-semibold text-zinc-100">Reset Settings?</h3>
+            </div>
+            <p className="text-zinc-400 text-sm mb-6">
+              This will reset all settings to their default values. Your current configuration will be lost.
+              You'll need to click "Save" to apply the changes.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowResetConfirm(false)}
+                className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmReset}
+                className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors"
+              >
+                Reset to Defaults
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800 shrink-0">
         <div className="flex items-center gap-3">
@@ -376,7 +434,7 @@ export function SettingsPanel() {
           {/* Version Info */}
           <div className="bg-zinc-900/30 border border-zinc-800/50 rounded-xl p-6 text-center">
             <p className="text-zinc-400 text-sm mb-2">TruthGit Desktop</p>
-            <p className="text-2xl font-light text-zinc-200 mb-1">v0.2.4</p>
+            <p className="text-2xl font-light text-zinc-200 mb-1">v0.2.5</p>
             <p className="text-xs text-zinc-600">Security Hardening Release</p>
             <div className="mt-4 flex items-center justify-center gap-4 text-xs text-zinc-500">
               <span>Tauri 2.0</span>

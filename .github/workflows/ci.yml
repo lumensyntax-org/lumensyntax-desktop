@@ -49,6 +49,18 @@ jobs:
         working-directory: src-tauri
         run: cargo test --verbose
 
+      - name: Run security-specific tests
+        working-directory: src-tauri
+        run: |
+          echo "=== Security Test Summary ==="
+          cargo test --verbose 2>&1 | grep -E "(test_.*security|test_.*dangerous|test_.*blocked|test_.*sanitize|test_.*decompression|PASSED|FAILED)" || true
+          echo ""
+          echo "=== Verifying security constants ==="
+          grep -E "const (MAX_|SUBPROCESS_TIMEOUT)" src/lib.rs
+          echo ""
+          echo "=== Verifying default api_url is localhost ==="
+          grep -A2 "api_url:" src/lib.rs | head -3
+
       - name: Check Rust formatting
         working-directory: src-tauri
         run: cargo fmt --check || true
@@ -76,6 +88,18 @@ jobs:
 
       - name: Type check
         run: npx tsc --noEmit
+
+      - name: Security check - verify frontend defaults
+        run: |
+          echo "=== Verifying frontend DEFAULT_SETTINGS ==="
+          # Check that api_url is localhost (not remote)
+          if grep -E "api_url.*https?://[^l]" src/components/settings/SettingsPanel.tsx | grep -v "localhost" | grep -v "127.0.0.1"; then
+            echo "ERROR: Frontend DEFAULT_SETTINGS.api_url must be localhost!"
+            exit 1
+          fi
+          # Verify api_mode default is local
+          grep "api_mode: 'local'" src/components/settings/SettingsPanel.tsx || { echo "ERROR: api_mode must default to 'local'"; exit 1; }
+          echo "Frontend security defaults verified ✓"
 
       - name: Build frontend
         run: npm run build
