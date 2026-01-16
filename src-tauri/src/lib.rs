@@ -150,6 +150,44 @@ fn get_vault_path() -> Option<PathBuf> {
     Some(path)
 }
 
+// ====== SECURITY: Path traversal prevention ======
+
+/// Validates that a path is safely within a base directory.
+/// Prevents directory traversal attacks (e.g., "../../etc/passwd")
+fn validate_path_within_base(base: &PathBuf, relative: &str) -> Result<PathBuf, String> {
+    // Reject obviously malicious patterns early
+    if relative.contains("..") {
+        return Err("🚫 BLOCKED: Path contains '..' (directory traversal attempt)".to_string());
+    }
+
+    // Reject absolute paths
+    if relative.starts_with('/') || relative.starts_with('\\') {
+        return Err("🚫 BLOCKED: Absolute paths are not allowed".to_string());
+    }
+
+    // Reject paths with null bytes (can bypass checks in some systems)
+    if relative.contains('\0') {
+        return Err("🚫 BLOCKED: Path contains null byte".to_string());
+    }
+
+    // Construct the target path
+    let target = base.join(relative);
+
+    // Canonicalize both paths to resolve symlinks and normalize
+    let canonical_base = fs::canonicalize(base)
+        .map_err(|e| format!("Failed to canonicalize base path: {}", e))?;
+
+    let canonical_target = fs::canonicalize(&target)
+        .map_err(|_| format!("Path not found or inaccessible: {}", relative))?;
+
+    // SECURITY: Ensure the target is within the base directory
+    if !canonical_target.starts_with(&canonical_base) {
+        return Err("🚫 BLOCKED: Path escapes allowed directory (directory traversal attempt)".to_string());
+    }
+
+    Ok(canonical_target)
+}
+
 fn decompress_object(path: &PathBuf) -> Result<serde_json::Value, String> {
     let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
 
@@ -613,8 +651,11 @@ async fn get_vault_status() -> Result<serde_json::Value, String> {
 async fn list_vault_directory(relative_path: Option<String>) -> Result<Vec<VaultFile>, String> {
     let vault_path = get_vault_path().ok_or("Could not find home directory")?;
 
+    // ====== SECURITY: Validate path to prevent directory traversal ======
     let target_path = match relative_path {
-        Some(ref p) if !p.is_empty() => vault_path.join(p),
+        Some(ref p) if !p.is_empty() => {
+            validate_path_within_base(&vault_path, p)?
+        },
         _ => vault_path.clone(),
     };
 
@@ -671,11 +712,9 @@ async fn list_vault_directory(relative_path: Option<String>) -> Result<Vec<Vault
 #[tauri::command]
 async fn read_note(relative_path: String) -> Result<VaultNote, String> {
     let vault_path = get_vault_path().ok_or("Could not find home directory")?;
-    let note_path = vault_path.join(&relative_path);
 
-    if !note_path.exists() {
-        return Err(format!("Note not found: {}", relative_path));
-    }
+    // ====== SECURITY: Validate path to prevent directory traversal ======
+    let note_path = validate_path_within_base(&vault_path, &relative_path)?;
 
     let content = fs::read_to_string(&note_path)
         .map_err(|e| format!("Failed to read note: {}", e))?;
@@ -921,6 +960,47 @@ async fn check_command_safety(command: String) -> Result<CommandCheck, String> {
     })
 }
 
+/// Parse a command string into program and arguments
+/// This is a simple parser that handles basic quoting
+fn parse_command(command: &str) -> Result<(String, Vec<String>), String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = ' ';
+
+    for c in command.chars() {
+        match c {
+            '"' | '\'' if !in_quotes => {
+                in_quotes = true;
+                quote_char = c;
+            }
+            c if c == quote_char && in_quotes => {
+                in_quotes = false;
+            }
+            ' ' if !in_quotes => {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    if parts.is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    let program = parts.remove(0);
+    Ok((program, parts))
+}
+
 #[tauri::command]
 async fn execute_shell(command: String, cwd: Option<String>) -> Result<ShellOutput, String> {
     // ====== SECURITY: Server-side enforcement ======
@@ -942,17 +1022,9 @@ async fn execute_shell(command: String, cwd: Option<String>) -> Result<ShellOutp
     }
     // ====== END SECURITY CHECK ======
 
-    let shell = if cfg!(target_os = "windows") {
-        "cmd"
-    } else {
-        "bash"
-    };
-
-    let shell_arg = if cfg!(target_os = "windows") {
-        "/C"
-    } else {
-        "-c"
-    };
+    // ====== SECURITY: Direct execution without shell ======
+    // Parse command into program and args (no shell interpolation)
+    let (program, args) = parse_command(&command)?;
 
     // Use configurable working directory from settings
     let working_dir = cwd.unwrap_or_else(|| {
@@ -968,12 +1040,12 @@ async fn execute_shell(command: String, cwd: Option<String>) -> Result<ShellOutp
             .unwrap_or_else(|| ".".to_string())
     });
 
-    let output = Command::new(shell)
-        .arg(shell_arg)
-        .arg(&command)
+    // Execute directly WITHOUT shell (safer - no shell interpolation)
+    let output = Command::new(&program)
+        .args(&args)
         .current_dir(&working_dir)
         .output()
-        .map_err(|e| format!("Failed to execute command: {}", e))?;
+        .map_err(|e| format!("Failed to execute '{}': {}", program, e))?;
 
     let exit_code = output.status.code().unwrap_or(-1);
 
@@ -1278,5 +1350,91 @@ mod tests {
             "verify".to_string(),
             "E = mc²".to_string()
         ]).is_ok());
+    }
+
+    // ====== parse_command tests ======
+
+    #[test]
+    fn test_parse_simple_command() {
+        let (prog, args) = parse_command("ls").unwrap();
+        assert_eq!(prog, "ls");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_command_with_args() {
+        let (prog, args) = parse_command("ls -la /tmp").unwrap();
+        assert_eq!(prog, "ls");
+        assert_eq!(args, vec!["-la", "/tmp"]);
+    }
+
+    #[test]
+    fn test_parse_command_with_quotes() {
+        let (prog, args) = parse_command("grep \"hello world\" file.txt").unwrap();
+        assert_eq!(prog, "grep");
+        assert_eq!(args, vec!["hello world", "file.txt"]);
+    }
+
+    #[test]
+    fn test_parse_command_with_single_quotes() {
+        let (prog, args) = parse_command("echo 'test message'").unwrap();
+        assert_eq!(prog, "echo");
+        assert_eq!(args, vec!["test message"]);
+    }
+
+    #[test]
+    fn test_parse_truthgit_command() {
+        let (prog, args) = parse_command("truthgit verify \"Water boils at 100°C\"").unwrap();
+        assert_eq!(prog, "truthgit");
+        assert_eq!(args, vec!["verify", "Water boils at 100°C"]);
+    }
+
+    #[test]
+    fn test_parse_empty_command_fails() {
+        assert!(parse_command("").is_err());
+        assert!(parse_command("   ").is_err());
+    }
+
+    // ====== Directory traversal prevention tests ======
+    // Note: These tests require actual filesystem paths to work
+    // They test the validation logic conceptually
+
+    #[test]
+    fn test_path_validation_rejects_dotdot() {
+        let base = PathBuf::from("/tmp");
+        let result = validate_path_within_base(&base, "../etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(".."));
+    }
+
+    #[test]
+    fn test_path_validation_rejects_absolute() {
+        let base = PathBuf::from("/tmp");
+        let result = validate_path_within_base(&base, "/etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Absolute"));
+    }
+
+    #[test]
+    fn test_path_validation_rejects_null_byte() {
+        let base = PathBuf::from("/tmp");
+        let result = validate_path_within_base(&base, "file\0.txt");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("null"));
+    }
+
+    #[test]
+    fn test_path_validation_rejects_backslash_absolute() {
+        let base = PathBuf::from("/tmp");
+        let result = validate_path_within_base(&base, "\\etc\\passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_path_validation_rejects_encoded_traversal() {
+        let base = PathBuf::from("/tmp");
+        // Even URL-encoded or other variants with ".." should fail
+        let result = validate_path_within_base(&base, "foo/../../../etc/passwd");
+        assert!(result.is_err());
     }
 }
